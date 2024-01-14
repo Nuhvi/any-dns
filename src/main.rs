@@ -6,8 +6,8 @@ use std::{
 
 #[derive(Debug)]
 struct PendingQuery {
-    id: u16,
     from: SocketAddr,
+    query: Vec<u8>,
 }
 
 struct AnyDNS {
@@ -29,14 +29,23 @@ impl AnyDNS {
             let (size, from) = socket.recv_from(&mut buffer)?;
 
             let query = &mut buffer[..size];
-            let packet = Packet::parse(query).unwrap();
 
             if from == self.icann_resolver {
-                if let Some(PendingQuery { id, from }) = self.pending_queries.remove(&packet.id()) {
-                    let mut reply = Packet::new_reply(id);
+                let packet = Packet::parse(query).unwrap();
+
+                if let Some(PendingQuery { query, from }) =
+                    self.pending_queries.remove(&packet.id())
+                {
+                    let original_query = Packet::parse(&query).unwrap();
+
+                    let mut reply = Packet::new_reply(original_query.id());
 
                     for answer in packet.answers {
                         reply.answers.push(answer)
+                    }
+
+                    for question in original_query.questions {
+                        reply.questions.push(question)
                     }
 
                     socket
@@ -49,7 +58,7 @@ impl AnyDNS {
                 self.pending_queries.insert(
                     id,
                     PendingQuery {
-                        id: packet.id(),
+                        query: query.to_vec(),
                         from,
                     },
                 );
@@ -72,9 +81,7 @@ impl AnyDNS {
 
 impl Default for AnyDNS {
     fn default() -> Self {
-        // let icann_resolver: SocketAddr = SocketAddr::from(([8, 8, 8, 8], 53));
-        let icann_resolver: SocketAddr = SocketAddr::from(([1, 1, 1, 1], 53));
-        // let icann_resolver: SocketAddr = SocketAddr::from(([192, 168, 1, 1], 53));
+        let icann_resolver: SocketAddr = SocketAddr::from(([192, 168, 1, 1], 53));
 
         Self {
             next_id: 0,
