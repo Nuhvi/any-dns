@@ -3,7 +3,7 @@
 use simple_dns::Packet;
 use std::{
     collections::HashMap,
-    net::{SocketAddr, UdpSocket},
+    net::{SocketAddr, UdpSocket}, str::FromStr, thread::sleep, time::{Duration, Instant},
 };
 
 use crate::Result;
@@ -39,6 +39,7 @@ impl Builder {
 struct PendingQuery {
     from: SocketAddr,
     query: Vec<u8>,
+    sent: Instant
 }
 
 #[derive(Debug)]
@@ -51,26 +52,50 @@ pub struct AnyDNS {
 impl AnyDNS {
     pub fn run(&mut self) -> Result<()> {
         // Bind the server socket to localhost:53
-        let socket = UdpSocket::bind(("0.0.0.0", 53))?;
-
+        let listening = SocketAddr::from_str("0.0.0.0:53").expect("Valid socket address");
+        let socket = UdpSocket::bind(listening)?;
+        socket.set_nonblocking(true);
         // Buffer to store incoming data
         let mut buffer = [0; 1024];
 
+        println!("Listening on {}", listening);
         loop {
             // Receive data from a client
-            let (size, from) = socket.recv_from(&mut buffer)?;
-
+            let mut size: usize;
+            let mut from: SocketAddr;
+            loop { // Loop as long as there is no significant error
+                match socket.recv_from(&mut buffer) {
+                    Ok((size_, from_)) => {
+                        size = size_;
+                        from = from_;
+                        break;
+                    },
+                    Err(err) => {
+                        let err: std::io::Error = err;
+                        if err.kind() == std::io::ErrorKind::WouldBlock {
+                            sleep(Duration::from_micros(1000));
+                            continue;
+                        } else {
+                            // Other error
+                            return Err(crate::error::Error::IO(err));
+                        }
+                    }
+                };
+            };
+            // println!("Message from {}", from);
             let query = &mut buffer[..size];
-
+            let instant = Instant::now();
             if from == self.icann_resolver {
                 let packet = Packet::parse(query).unwrap();
 
-                if let Some(PendingQuery { query, from }) =
+                if let Some(PendingQuery { query, from , sent}) =
                     self.pending_queries.remove(&packet.id())
                 {
                     let original_query = Packet::parse(&query).unwrap();
 
                     let mut reply = Packet::new_reply(original_query.id());
+
+                    let qname = original_query.questions.get(0).unwrap().qname.to_string();
 
                     for answer in packet.answers {
                         reply.answers.push(answer)
@@ -83,6 +108,8 @@ impl AnyDNS {
                     socket
                         .send_to(&reply.build_bytes_vec().unwrap(), from)
                         .unwrap();
+                    let elapsed = sent.elapsed();
+                    println!("Reply to {} within {}ms {}", from, elapsed.as_millis(), qname);
                 };
             } else {
                 let id = self.next_id();
@@ -92,6 +119,7 @@ impl AnyDNS {
                     PendingQuery {
                         query: query.to_vec(),
                         from,
+                        sent: Instant::now()
                     },
                 );
 
