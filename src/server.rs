@@ -47,6 +47,7 @@ pub struct AnyDNS {
     next_id: u16,
     icann_resolver: SocketAddr,
     pending_queries: HashMap<u16, PendingQuery>,
+    
 }
 
 impl AnyDNS {
@@ -61,28 +62,7 @@ impl AnyDNS {
         println!("Listening on {}", listening);
         loop {
             // Receive data from a client
-            let mut size: usize;
-            let mut from: SocketAddr;
-            loop { // Loop as long as there is no significant error
-                match socket.recv_from(&mut buffer) {
-                    Ok((size_, from_)) => {
-                        size = size_;
-                        from = from_;
-                        break;
-                    },
-                    Err(err) => {
-                        let err: std::io::Error = err;
-                        if err.kind() == std::io::ErrorKind::WouldBlock {
-                            sleep(Duration::from_micros(1000));
-                            continue;
-                        } else {
-                            // Other error
-                            return Err(crate::error::Error::IO(err));
-                        }
-                    }
-                };
-            };
-            // println!("Message from {}", from);
+            let (size, from) = socket.recv_from(&mut buffer)?;
             let query = &mut buffer[..size];
             let instant = Instant::now();
             if from == self.icann_resolver {
