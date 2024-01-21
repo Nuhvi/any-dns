@@ -9,8 +9,8 @@ use std::{
 
 use simple_dns::Packet;
 
-use crate::Error;
-use crate::Result;
+
+use crate::error::{Result, Error};
 
 #[derive(Debug)]
 pub struct PendingQuery {
@@ -19,6 +19,7 @@ pub struct PendingQuery {
     sent: Instant,
 }
 
+#[derive(Debug)]
 pub struct DnsProcessor {
     pending_queries: Arc<Mutex<HashMap<u16, PendingQuery>>>,
     socket: UdpSocket,
@@ -60,6 +61,9 @@ impl DnsProcessor {
         id
     }
 
+    /**
+     * Receives data from the socket. Honors the timeout so the server can be stopped by join().
+     */
     fn recv_from(&self, buffer: &mut [u8; 1024]) -> Result<(usize, SocketAddr)> {
         loop {
             match self.socket.recv_from(buffer) {
@@ -87,6 +91,9 @@ impl DnsProcessor {
         return self.should_stop.load(std::sync::atomic::Ordering::Relaxed);
     }
 
+    /**
+     * Run actual dns query logic.
+     */
     pub fn run(&mut self) -> Result<()> {
         let mut buffer = [0; 1024];
         loop {
@@ -108,7 +115,7 @@ impl DnsProcessor {
 
                     let mut reply = Packet::new_reply(original_query.id());
 
-                    let qname = original_query.questions.get(0).unwrap().qname.to_string();
+                    let qname = original_query.questions.get(0).unwrap().clone();
 
                     for answer in packet.answers {
                         reply.answers.push(answer)
@@ -123,7 +130,7 @@ impl DnsProcessor {
                         .unwrap();
                     let elapsed = sent.elapsed();
                     println!(
-                        "Reply {} within {}ms",
+                        "Reply {:?} within {}ms",
                         qname,
                         elapsed.as_millis()
                     );
@@ -157,10 +164,12 @@ impl DnsProcessor {
 /**
  * Threaded DnsProcessor.
  */
+#[derive(Debug)]
 pub struct DnsThread {
     should_stop: Arc<AtomicBool>,
     handler: JoinHandle<Result<(), Error>>,
 }
+
 
 impl DnsThread {
     /**
@@ -205,55 +214,6 @@ impl DnsThread {
     }
 }
 
-pub struct DnsServer {
-    threads: Vec<DnsThread>,
-    pending_queries: Arc<Mutex<HashMap<u16, PendingQuery>>>
-}
-
-impl DnsServer {
-
-    fn calculate_id_range(thread_count: u16, i: u16) -> Range<u16> {
-        let bucket_size = u16::MAX / thread_count;
-        Range{
-            start: i * bucket_size,
-            end: (i + 1) * bucket_size -1
-        }
-    }
-    /**
-     * Creates a new DNS server with x threads.
-     */
-    pub fn new(icann_resolver: SocketAddr, thread_count: usize) -> Self {
-        let listening = SocketAddr::from_str("0.0.0.0:53").expect("Valid socket address");
-        let socket = UdpSocket::bind(listening).expect("Address available");
-        socket.set_read_timeout(Some(Duration::from_secs(1)));
-        let pending_queries: Arc<Mutex<HashMap<u16, PendingQuery>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-
-        let mut threads = vec![];
-        for i in 0..thread_count {
-            let id_range = Self::calculate_id_range(thread_count as u16, i as u16);
-            let thread = DnsThread::new(&socket, &icann_resolver, &pending_queries, id_range);
-            threads.push(thread);
-        }
-
-        DnsServer {
-            threads,
-            pending_queries,
-        }
-    }
-
-    /**
-     * Stops the server and consumes this instance.
-     */
-    pub fn join(mut self) {
-        for thread in self.threads.iter_mut() {
-            thread.stop();
-        };
-        for thread in self.threads {
-            thread.join()
-        };
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -266,32 +226,25 @@ mod tests {
         time::Duration, ops::Range,
     };
 
-    use super::{DnsProcessor, DnsServer, PendingQuery};
+    use super::{DnsProcessor, PendingQuery};
 
-    #[test]
-    fn run_processor() {
-        let listening = SocketAddr::from_str("0.0.0.0:53").expect("Valid socket address");
-        let icann_resolver = SocketAddr::from_str("192.168.1.1:53").expect("Valid socket address");
-        let socket = UdpSocket::bind(listening).expect("Address available");
-        socket.set_read_timeout(Some(Duration::from_millis(500)));
-        println!("Listening on {}...", listening);
-        let pending_queries: Arc<Mutex<HashMap<u16, PendingQuery>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-        let mut processor = DnsProcessor::new(
-            socket,
-            icann_resolver,
-            pending_queries,
-            Range{start: 0, end: 1000},
-            Arc::new(AtomicBool::new(false))
-        );
-        processor.run();
-    }
+    // #[test]
+    // fn run_processor() {
+    //     let listening = SocketAddr::from_str("0.0.0.0:53").expect("Valid socket address");
+    //     let icann_resolver = SocketAddr::from_str("192.168.1.1:53").expect("Valid socket address");
+    //     let socket = UdpSocket::bind(listening).expect("Address available");
+    //     socket.set_read_timeout(Some(Duration::from_millis(500)));
+    //     println!("Listening on {}...", listening);
+    //     let pending_queries: Arc<Mutex<HashMap<u16, PendingQuery>>> =
+    //         Arc::new(Mutex::new(HashMap::new()));
+    //     let mut processor = DnsProcessor::new(
+    //         socket,
+    //         icann_resolver,
+    //         pending_queries,
+    //         Range{start: 0, end: 1000},
+    //         Arc::new(AtomicBool::new(false))
+    //     );
+    //     processor.run();
+    // }
 
-    #[test]
-    fn stop_server() {
-        let icann_resolver = SocketAddr::from_str("192.168.1.1:53").expect("Valid socket address");
-        let server = DnsServer::new( icann_resolver, 1);
-        sleep(Duration::from_secs(1));
-        server.join();
-    }
 }

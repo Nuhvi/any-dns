@@ -3,20 +3,25 @@
 use simple_dns::Packet;
 use std::{
     collections::HashMap,
-    net::{SocketAddr, UdpSocket}, str::FromStr, thread::sleep, time::{Duration, Instant},
+    net::{SocketAddr, UdpSocket}, str::FromStr, thread::sleep, time::{Duration, Instant}, sync::{Arc, Mutex}, ops::Range,
 };
 
-use crate::Result;
+use crate::dns_thread::{DnsThread, PendingQuery};
+
+
+
 
 #[derive(Debug)]
 pub struct Builder {
     icann_resolver: SocketAddr,
+    thread_count: u8,
 }
 
 impl Builder {
     pub fn new() -> Self {
         Self {
             icann_resolver: SocketAddr::from(([192, 168, 1, 1], 53)),
+            thread_count: 8
         }
     }
 
@@ -26,96 +31,60 @@ impl Builder {
         self
     }
 
+    /// Set the number of threads used. Default: 8.
+    pub fn threads(mut self, thread_count: u8) -> Self {
+        self.thread_count = thread_count;
+        self
+    }
+
     pub fn build(self) -> AnyDNS {
+        let listening = SocketAddr::from_str("0.0.0.0:53").expect("Valid socket address");
+        let socket = UdpSocket::bind(listening).expect("Address available");
+        socket.set_read_timeout(Some(Duration::from_secs(1)));
+        let pending_queries: Arc<Mutex<HashMap<u16, PendingQuery>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+
+        let mut threads = vec![];
+        for i in 0..self.thread_count {
+            let id_range = Self::calculate_id_range(self.thread_count as u16, i as u16);
+            let thread = DnsThread::new(&socket, &self.icann_resolver, &pending_queries, id_range);
+            threads.push(thread);
+        }
+
         AnyDNS {
-            next_id: 0,
-            icann_resolver: self.icann_resolver,
-            pending_queries: HashMap::new(),
+            threads,
+            pending_queries,
+            icann_resolver: self.icann_resolver
         }
     }
-}
 
-#[derive(Debug)]
-struct PendingQuery {
-    from: SocketAddr,
-    query: Vec<u8>,
-    sent: Instant
+    fn calculate_id_range(thread_count: u16, i: u16) -> Range<u16> {
+        let bucket_size = u16::MAX / thread_count;
+        Range{
+            start: i * bucket_size,
+            end: (i + 1) * bucket_size -1
+        }
+    }
 }
 
 #[derive(Debug)]
 pub struct AnyDNS {
-    next_id: u16,
     icann_resolver: SocketAddr,
-    pending_queries: HashMap<u16, PendingQuery>,
-    
+    threads: Vec<DnsThread>,
+    pending_queries: Arc<Mutex<HashMap<u16, PendingQuery>>>,
 }
 
 impl AnyDNS {
-    pub fn run(&mut self) -> Result<()> {
-        // Bind the server socket to localhost:53
-        let listening = SocketAddr::from_str("0.0.0.0:53").expect("Valid socket address");
-        let socket = UdpSocket::bind(listening)?;
-        socket.set_nonblocking(true);
-        // Buffer to store incoming data
-        let mut buffer = [0; 1024];
-
-        println!("Listening on {}", listening);
-        loop {
-            // Receive data from a client
-            let (size, from) = socket.recv_from(&mut buffer)?;
-            let query = &mut buffer[..size];
-            let instant = Instant::now();
-            if from == self.icann_resolver {
-                let packet = Packet::parse(query).unwrap();
-
-                if let Some(PendingQuery { query, from , sent}) =
-                    self.pending_queries.remove(&packet.id())
-                {
-                    let original_query = Packet::parse(&query).unwrap();
-
-                    let mut reply = Packet::new_reply(original_query.id());
-
-                    let qname = original_query.questions.get(0).unwrap().qname.to_string();
-
-                    for answer in packet.answers {
-                        reply.answers.push(answer)
-                    }
-
-                    for question in original_query.questions {
-                        reply.questions.push(question)
-                    }
-
-                    socket
-                        .send_to(&reply.build_bytes_vec().unwrap(), from)
-                        .unwrap();
-                    let elapsed = sent.elapsed();
-                    println!("Reply to {} within {}ms {}", from, elapsed.as_millis(), qname);
-                };
-            } else {
-                let id = self.next_id();
-
-                self.pending_queries.insert(
-                    id,
-                    PendingQuery {
-                        query: query.to_vec(),
-                        from,
-                        sent: Instant::now()
-                    },
-                );
-
-                let id_bytes = id.to_be_bytes();
-                query[0] = id_bytes[0];
-                query[1] = id_bytes[1];
-
-                socket.send_to(&query, self.icann_resolver).unwrap();
-            }
-        }
-    }
-
-    fn next_id(&mut self) -> u16 {
-        let id = self.next_id;
-        let _ = self.next_id.wrapping_add(1);
-        id
+    /**
+     * Stops the server and consumes the instance.
+     */
+    pub fn join(mut self) {
+        for thread in self.threads.iter_mut() {
+            thread.stop();
+        };
+        for thread in self.threads {
+            thread.join()
+        };
     }
 }
 
