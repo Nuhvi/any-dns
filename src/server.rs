@@ -1,6 +1,6 @@
 //! Main server implementation
 
-use simple_dns::Packet;
+use simple_dns::{Packet, Name, Question};
 use std::{
     collections::HashMap,
     net::{SocketAddr, UdpSocket}, str::FromStr, thread::sleep, time::{Duration, Instant}, sync::{Arc, Mutex}, ops::Range,
@@ -11,17 +11,22 @@ use crate::dns_thread::{DnsThread, PendingQuery};
 
 
 
-#[derive(Debug)]
+
 pub struct Builder {
     icann_resolver: SocketAddr,
     thread_count: u8,
+    handler: for<'a> fn(&'a Packet<'a>) -> Result<Packet<'a>, String>,
 }
 
 impl Builder {
     pub fn new() -> Self {
         Self {
             icann_resolver: SocketAddr::from(([192, 168, 1, 1], 53)),
-            thread_count: 8
+            thread_count: 8,
+            handler: |p| {
+                println!("Called handler");
+                Err("Not processed".to_string())
+            }
         }
     }
 
@@ -37,6 +42,12 @@ impl Builder {
         self
     }
 
+    /** Set handler to process the dns packet. `Ok()`` should include a dns packet with answers. `Err()` will fallback to ICANN. */
+    pub fn handler(mut self, handler: for<'a> fn(&Packet<'a>) -> Result<Packet<'a>, String>) -> Self {
+        self.handler = handler;
+        self
+    }
+
     pub fn build(self) -> AnyDNS {
         let listening = SocketAddr::from_str("0.0.0.0:53").expect("Valid socket address");
         let socket = UdpSocket::bind(listening).expect("Address available");
@@ -47,7 +58,7 @@ impl Builder {
         let mut threads = vec![];
         for i in 0..self.thread_count {
             let id_range = Self::calculate_id_range(self.thread_count as u16, i as u16);
-            let thread = DnsThread::new(&socket, &self.icann_resolver, &pending_queries, id_range);
+            let thread = DnsThread::new(&socket, &self.icann_resolver, &pending_queries, id_range, self.handler.clone());
             threads.push(thread);
         }
 

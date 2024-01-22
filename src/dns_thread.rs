@@ -27,6 +27,7 @@ pub struct DnsProcessor {
     next_id: u16,
     id_range: Range<u16>,
     should_stop: Arc<AtomicBool>,
+    handler: for<'a> fn(&'a Packet<'a>) -> Result<Packet<'a>, String>,
 }
 
 impl DnsProcessor {
@@ -34,6 +35,7 @@ impl DnsProcessor {
      * Creates a new dns processor.
      * `socket` is a socket handler.
      * `id_range` is a range of dns packet ids this thread can use to send to `icann_resolver`.
+     * `handler` custom packet handler.
      */
     pub fn new(
         socket: UdpSocket,
@@ -41,6 +43,7 @@ impl DnsProcessor {
         pending_queries: Arc<Mutex<HashMap<u16, PendingQuery>>>,
         id_range: Range<u16>,
         should_stop: Arc<AtomicBool>,
+        handler: for<'a> fn(&'a Packet<'a>) -> Result<Packet<'a>, String>
     ) -> Self {
         DnsProcessor {
             socket,
@@ -49,6 +52,7 @@ impl DnsProcessor {
             id_range: id_range.clone(),
             next_id: id_range.start,
             should_stop,
+            handler
         }
     }
 
@@ -112,6 +116,7 @@ impl DnsProcessor {
 
                 if let Some(PendingQuery { query, from, sent }) = removed_opt {
                     let original_query = Packet::parse(&query).unwrap();
+                    (self.handler)(&original_query);
 
                     let mut reply = Packet::new_reply(original_query.id());
 
@@ -179,7 +184,8 @@ impl DnsThread {
         socket: &UdpSocket,
         icann_resolver: &SocketAddr,
         pending_queries: &Arc<Mutex<HashMap<u16, PendingQuery>>>,
-        id_range: Range<u16>
+        id_range: Range<u16>,
+        handler: for<'a> fn(&'a Packet<'a>) -> Result<Packet<'a>, String>
     ) -> Self {
         let socket = socket.try_clone().expect("Should clone");
         let icann_resolver = icann_resolver.clone();
@@ -191,6 +197,7 @@ impl DnsThread {
             pending_queries,
             id_range,
             should_stop.clone(),
+            handler
         );
         let thread_work = std::thread::spawn(move || processor.run());
         DnsThread {
