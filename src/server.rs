@@ -20,11 +20,12 @@ pub struct Builder {
 
 impl Builder {
     pub fn new() -> Self {
+        let i = 32;
         Self {
             icann_resolver: SocketAddr::from(([192, 168, 1, 1], 53)),
             thread_count: 8,
             handler: |p| {
-                println!("Called handler");
+                println!("Called handler ");
                 Err("Not processed".to_string())
             }
         }
