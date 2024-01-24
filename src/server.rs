@@ -6,9 +6,7 @@ use std::{
     net::{SocketAddr, UdpSocket}, str::FromStr, thread::sleep, time::{Duration, Instant}, sync::{Arc, Mutex}, ops::Range,
 };
 
-use crate::dns_thread::{DnsThread, PendingQuery};
-
-
+use crate::{dns_thread::DnsThread, pending_queries::PendingQuery};
 
 
 

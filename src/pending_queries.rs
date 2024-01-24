@@ -2,25 +2,10 @@ use std::{net::SocketAddr, time::Instant, collections::HashMap, sync::{Mutex, Ar
 
 #[derive(Debug, Clone)]
 pub struct PendingQuery {
-    from: SocketAddr,
-    query: Vec<u8>,
-    sent: Instant,
-    id: u16
-}
-
-pub trait PendingQueryStore {
-    /**
-     * Create a new store
-     */
-    fn new() -> Self;
-    /**
-     * Insert query.
-     */
-    fn insert(&mut self, query: PendingQuery);
-    /**
-     * Remove and return removed query.
-     */
-    fn remove(&mut self, id: &u16) -> Option<PendingQuery>;
+    pub from: SocketAddr,
+    pub query: Vec<u8>,
+    pub sent: Instant,
+    pub id: u16
 }
 
 /**
@@ -31,7 +16,7 @@ pub struct SimpleStore {
     pending_queries: HashMap<u16, PendingQuery>,
 }
 
-impl PendingQueryStore for SimpleStore {
+impl SimpleStore {
     fn insert(&mut self, query: PendingQuery) {
         self.pending_queries.insert(query.id, query);
     }
@@ -57,7 +42,7 @@ pub struct ConcurrentStore {
     pending_queries: Arc<Mutex<HashMap<u16, PendingQuery>>>,
 }
 
-impl PendingQueryStore for ConcurrentStore {
+impl ConcurrentStore {
     fn insert(&mut self, query: PendingQuery) {
         let mut locked = self.pending_queries.lock().expect("Lock success");
         locked.insert(query.id, query);
@@ -78,5 +63,44 @@ impl PendingQueryStore for ConcurrentStore {
 impl Clone for ConcurrentStore {
     fn clone(&self) -> Self {
         Self { pending_queries: Arc::clone(&self.pending_queries) }
+    }
+}
+
+
+#[derive(Debug, Clone)]
+pub enum PendingStore {
+    Simple(SimpleStore),
+    Concurrent(ConcurrentStore)
+}
+
+impl PendingStore {
+    pub fn new_simple() -> Self {
+        Self::Simple(SimpleStore::new())
+    }
+
+    pub fn new_concurrent() -> Self {
+        Self::Concurrent(ConcurrentStore::new())
+    }
+
+    pub fn insert(&mut self, query: PendingQuery) {
+        match self {
+            Self::Simple(store) => {
+                store.insert(query)
+            },
+            Self::Concurrent(store) => {
+                store.insert(query)
+            }
+        }
+    }
+
+    pub fn remove(&mut self, id: &u16) -> Option<PendingQuery> {
+        match self {
+            Self::Simple(store) => {
+                store.remove(id)
+            },
+            Self::Concurrent(store) => {
+                store.remove(id)
+            }
+        }
     }
 }

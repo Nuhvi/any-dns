@@ -1,27 +1,24 @@
 use std::{
     collections::HashMap,
     net::{SocketAddr, UdpSocket},
+    ops::Range,
     str::FromStr,
     sync::{atomic::AtomicBool, mpsc::Sender, Arc, Mutex},
     thread::JoinHandle,
-    time::{Instant, Duration}, ops::Range,
+    time::{Duration, Instant},
 };
 
 use simple_dns::Packet;
 
-
-use crate::error::{Result, Error};
-
-#[derive(Debug)]
-pub struct PendingQuery {
-    from: SocketAddr,
-    query: Vec<u8>,
-    sent: Instant,
-}
+use crate::{
+    error::{Error, Result},
+    pending_queries::{PendingQuery, PendingStore, ConcurrentStore},
+};
 
 #[derive(Debug)]
 pub struct DnsProcessor {
-    pending_queries: Arc<Mutex<HashMap<u16, PendingQuery>>>,
+    pending_queries: PendingStore,
+    // pending_queries: Arc<Mutex<HashMap<u16, PendingQuery>>>,
     socket: UdpSocket,
     icann_resolver: SocketAddr,
     next_id: u16,
@@ -40,10 +37,11 @@ impl DnsProcessor {
     pub fn new(
         socket: UdpSocket,
         icann_resolver: SocketAddr,
-        pending_queries: Arc<Mutex<HashMap<u16, PendingQuery>>>,
+        // pending_queries: Arc<Mutex<HashMap<u16, PendingQuery>>>,
+        pending_queries: PendingStore,
         id_range: Range<u16>,
         should_stop: Arc<AtomicBool>,
-        handler: for<'a> fn(&'a Packet<'a>) -> Result<Packet<'a>, String>
+        handler: for<'a> fn(&'a Packet<'a>) -> Result<Packet<'a>, String>,
     ) -> Self {
         DnsProcessor {
             socket,
@@ -52,7 +50,7 @@ impl DnsProcessor {
             id_range: id_range.clone(),
             next_id: id_range.start,
             should_stop,
-            handler
+            handler,
         }
     }
 
@@ -73,9 +71,11 @@ impl DnsProcessor {
             match self.socket.recv_from(buffer) {
                 Ok((size, from)) => {
                     break Ok((size, from));
-                },
+                }
                 Err(err) => {
-                    if err.kind() == std::io::ErrorKind::WouldBlock || err.kind() == std::io::ErrorKind::TimedOut { 
+                    if err.kind() == std::io::ErrorKind::WouldBlock
+                        || err.kind() == std::io::ErrorKind::TimedOut
+                    {
                         // Run into timeout.
                         // https://doc.rust-lang.org/std/net/struct.UdpSocket.html#method.set_read_timeout
                         if self.should_stop_thread() {
@@ -106,15 +106,16 @@ impl DnsProcessor {
             if from == self.icann_resolver {
                 let packet = Packet::parse(query).unwrap();
 
-                let mut removed_opt: Option<PendingQuery> = None;
-                {
-                    // Open new block so lock gets released quickly again.
-                    let mut locked_pending_queries =
-                        self.pending_queries.lock().expect("Lock success");
-                    removed_opt = locked_pending_queries.remove(&packet.id());
-                }
+                let mut removed_opt: Option<PendingQuery> =
+                    self.pending_queries.remove(&packet.id());
 
-                if let Some(PendingQuery { query, from, sent }) = removed_opt {
+                if let Some(PendingQuery {
+                    id,
+                    query,
+                    from,
+                    sent,
+                }) = removed_opt
+                {
                     let original_query = Packet::parse(&query).unwrap();
                     (self.handler)(&original_query);
 
@@ -134,26 +135,16 @@ impl DnsProcessor {
                         .send_to(&reply.build_bytes_vec().unwrap(), from)
                         .unwrap();
                     let elapsed = sent.elapsed();
-                    println!(
-                        "Reply {:?} within {}ms",
-                        qname,
-                        elapsed.as_millis()
-                    );
+                    println!("Reply {:?} within {}ms", qname, elapsed.as_millis());
                 };
             } else {
                 let id = self.next_id();
-                {
-                    let mut locked_pending_queries =
-                        self.pending_queries.lock().expect("Lock success");
-                    locked_pending_queries.insert(
-                        id,
-                        PendingQuery {
-                            query: query.to_vec(),
-                            from,
-                            sent: Instant::now(),
-                        },
-                    );
-                }
+                self.pending_queries.insert(PendingQuery {
+                    id: id,
+                    query: query.to_vec(),
+                    from,
+                    sent: Instant::now(),
+                });
 
                 let id_bytes = id.to_be_bytes();
                 query[0] = id_bytes[0];
@@ -165,7 +156,6 @@ impl DnsProcessor {
     }
 }
 
-
 /**
  * Threaded DnsProcessor.
  */
@@ -174,7 +164,6 @@ pub struct DnsThread {
     should_stop: Arc<AtomicBool>,
     handler: JoinHandle<Result<(), Error>>,
 }
-
 
 impl DnsThread {
     /**
@@ -185,11 +174,11 @@ impl DnsThread {
         icann_resolver: &SocketAddr,
         pending_queries: &Arc<Mutex<HashMap<u16, PendingQuery>>>,
         id_range: Range<u16>,
-        handler: for<'a> fn(&'a Packet<'a>) -> Result<Packet<'a>, String>
+        handler: for<'a> fn(&'a Packet<'a>) -> Result<Packet<'a>, String>,
     ) -> Self {
         let socket = socket.try_clone().expect("Should clone");
         let icann_resolver = icann_resolver.clone();
-        let pending_queries = Arc::clone(pending_queries);
+        let pending_queries = PendingStore::new_concurrent();
         let should_stop = Arc::new(AtomicBool::new(false));
         let mut processor = DnsProcessor::new(
             socket,
@@ -197,7 +186,7 @@ impl DnsThread {
             pending_queries,
             id_range,
             should_stop.clone(),
-            handler
+            handler,
         );
         let thread_work = std::thread::spawn(move || processor.run());
         DnsThread {
@@ -208,9 +197,9 @@ impl DnsThread {
 
     /** Sends the stop signal to the thread. */
     pub fn stop(&mut self) {
-        self.should_stop.store(true, std::sync::atomic::Ordering::Relaxed)
+        self.should_stop
+            .store(true, std::sync::atomic::Ordering::Relaxed)
     }
-
 
     /**
      * Stops the thread and waits until it properly terminated. Consumes this instance.
@@ -221,16 +210,16 @@ impl DnsThread {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use std::{
         collections::HashMap,
         net::{SocketAddr, UdpSocket},
+        ops::Range,
         str::FromStr,
-        sync::{Arc, Mutex, atomic::AtomicBool},
+        sync::{atomic::AtomicBool, Arc, Mutex},
         thread::sleep,
-        time::Duration, ops::Range,
+        time::Duration,
     };
 
     use super::{DnsProcessor, PendingQuery};
@@ -253,5 +242,4 @@ mod tests {
     //     );
     //     processor.run();
     // }
-
 }

@@ -3,6 +3,7 @@
 mod error;
 mod server;
 mod dns_thread;
+mod pending_queries;
 
 use std::{sync::{atomic::AtomicBool, Arc}, cmp::Ordering, thread::sleep, time::Duration};
 
