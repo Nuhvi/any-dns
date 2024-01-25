@@ -12,44 +12,68 @@ use simple_dns::Packet;
 
 use crate::{
     error::{Error, Result},
-    pending_queries::{PendingQuery, PendingStore, ConcurrentStore},
+    pending_queries::{PendingQuery, PendingStore, ThreadSafeStore},
 };
 
 #[derive(Debug)]
 pub struct DnsProcessor {
     pending_queries: PendingStore,
-    // pending_queries: Arc<Mutex<HashMap<u16, PendingQuery>>>,
     socket: UdpSocket,
     icann_resolver: SocketAddr,
     next_id: u16,
     id_range: Range<u16>,
-    should_stop: Arc<AtomicBool>,
+    stop_signal: Arc<AtomicBool>,
     handler: for<'a> fn(&'a Packet<'a>) -> Result<Packet<'a>, String>,
 }
 
 impl DnsProcessor {
     /**
-     * Creates a new dns processor.
+     * Creates a new non-threadsafe dns processor.
      * `socket` is a socket handler.
-     * `id_range` is a range of dns packet ids this thread can use to send to `icann_resolver`.
      * `handler` custom packet handler.
      */
     pub fn new(
         socket: UdpSocket,
         icann_resolver: SocketAddr,
-        // pending_queries: Arc<Mutex<HashMap<u16, PendingQuery>>>,
-        pending_queries: PendingStore,
-        id_range: Range<u16>,
-        should_stop: Arc<AtomicBool>,
         handler: for<'a> fn(&'a Packet<'a>) -> Result<Packet<'a>, String>,
     ) -> Self {
+        DnsProcessor {
+            socket,
+            pending_queries: PendingStore::new_simple(),
+            icann_resolver,
+            id_range: 0..u16::MAX,
+            next_id: 0,
+            stop_signal: Arc::new(AtomicBool::new(false)),
+            handler,
+        }
+    }
+
+    /**
+     * Creates a new thread safe dns processor.
+     * `socket` is a socket handler.
+     * `pending_queries` must be a `PendingStore::ThreadSafe` store, otherwise udp packets will be missed.
+     * `id_range` is a range of dns packet ids this thread can use to send to `icann_resolver`.
+     * `handler` custom packet handler.
+     */
+    pub fn new_threadsafe(
+        socket: UdpSocket,
+        icann_resolver: SocketAddr,
+        pending_queries: PendingStore,
+        id_range: Range<u16>,
+        stop_signal: Arc<AtomicBool>,
+        handler: for<'a> fn(&'a Packet<'a>) -> Result<Packet<'a>, String>,
+    ) -> Self {
+        match &pending_queries {
+            PendingStore::ThreadSafe(store) => {},
+            _ => panic!("PendingStore::ThreadSafe required.")
+        };
         DnsProcessor {
             socket,
             pending_queries,
             icann_resolver,
             id_range: id_range.clone(),
             next_id: id_range.start,
-            should_stop,
+            stop_signal,
             handler,
         }
     }
@@ -64,7 +88,7 @@ impl DnsProcessor {
     }
 
     /**
-     * Receives data from the socket. Honors the timeout so the server can be stopped by join().
+     * Receives data from the socket. Honors the timeout so the server can be stopped by the stop signal.
      */
     fn recv_from(&self, buffer: &mut [u8; 1024]) -> Result<(usize, SocketAddr)> {
         loop {
@@ -78,7 +102,7 @@ impl DnsProcessor {
                     {
                         // Run into timeout.
                         // https://doc.rust-lang.org/std/net/struct.UdpSocket.html#method.set_read_timeout
-                        if self.should_stop_thread() {
+                        if self.should_stop() {
                             return Err(Error::Static("Stopped"));
                         } else {
                             // Ok, let's continue
@@ -91,8 +115,11 @@ impl DnsProcessor {
         }
     }
 
-    fn should_stop_thread(&self) -> bool {
-        return self.should_stop.load(std::sync::atomic::Ordering::Relaxed);
+    /**
+     * If stop signal has been given
+     */
+    fn should_stop(&self) -> bool {
+        return self.stop_signal.load(std::sync::atomic::Ordering::Relaxed);
     }
 
     /**
@@ -161,7 +188,7 @@ impl DnsProcessor {
  */
 #[derive(Debug)]
 pub struct DnsThread {
-    should_stop: Arc<AtomicBool>,
+    stop_signal: Arc<AtomicBool>,
     handler: JoinHandle<Result<(), Error>>,
 }
 
@@ -179,25 +206,25 @@ impl DnsThread {
         let socket = socket.try_clone().expect("Should clone");
         let icann_resolver = icann_resolver.clone();
         let pending_queries = PendingStore::new_concurrent();
-        let should_stop = Arc::new(AtomicBool::new(false));
-        let mut processor = DnsProcessor::new(
+        let stop_signal = Arc::new(AtomicBool::new(false));
+        let mut processor = DnsProcessor::new_threadsafe(
             socket,
             icann_resolver,
             pending_queries,
             id_range,
-            should_stop.clone(),
+            stop_signal.clone(),
             handler,
         );
         let thread_work = std::thread::spawn(move || processor.run());
         DnsThread {
             handler: thread_work,
-            should_stop,
+            stop_signal,
         }
     }
 
     /** Sends the stop signal to the thread. */
     pub fn stop(&mut self) {
-        self.should_stop
+        self.stop_signal
             .store(true, std::sync::atomic::Ordering::Relaxed)
     }
 

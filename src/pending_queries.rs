@@ -38,11 +38,11 @@ impl SimpleStore {
  * The data will stay shared.
  */
 #[derive(Debug)]
-pub struct ConcurrentStore {
+pub struct ThreadSafeStore {
     pending_queries: Arc<Mutex<HashMap<u16, PendingQuery>>>,
 }
 
-impl ConcurrentStore {
+impl ThreadSafeStore {
     fn insert(&mut self, query: PendingQuery) {
         let mut locked = self.pending_queries.lock().expect("Lock success");
         locked.insert(query.id, query);
@@ -60,7 +60,7 @@ impl ConcurrentStore {
     }
 }
 
-impl Clone for ConcurrentStore {
+impl Clone for ThreadSafeStore {
     fn clone(&self) -> Self {
         Self { pending_queries: Arc::clone(&self.pending_queries) }
     }
@@ -70,7 +70,7 @@ impl Clone for ConcurrentStore {
 #[derive(Debug, Clone)]
 pub enum PendingStore {
     Simple(SimpleStore),
-    Concurrent(ConcurrentStore)
+    ThreadSafe(ThreadSafeStore)
 }
 
 impl PendingStore {
@@ -79,7 +79,7 @@ impl PendingStore {
     }
 
     pub fn new_concurrent() -> Self {
-        Self::Concurrent(ConcurrentStore::new())
+        Self::ThreadSafe(ThreadSafeStore::new())
     }
 
     pub fn insert(&mut self, query: PendingQuery) {
@@ -87,7 +87,7 @@ impl PendingStore {
             Self::Simple(store) => {
                 store.insert(query)
             },
-            Self::Concurrent(store) => {
+            Self::ThreadSafe(store) => {
                 store.insert(query)
             }
         }
@@ -98,7 +98,7 @@ impl PendingStore {
             Self::Simple(store) => {
                 store.remove(id)
             },
-            Self::Concurrent(store) => {
+            Self::ThreadSafe(store) => {
                 store.remove(id)
             }
         }
