@@ -1,11 +1,5 @@
 use std::{
-    collections::HashMap,
-    net::{SocketAddr, UdpSocket},
-    ops::Range,
-    str::FromStr,
-    sync::{atomic::AtomicBool, mpsc::Sender, Arc, Mutex},
-    thread::{sleep, JoinHandle},
-    time::{Duration, Instant},
+    collections::HashMap, net::{SocketAddr, UdpSocket}, ops::Range, str::FromStr, sync::{atomic::AtomicBool, mpsc::Sender, Arc, Mutex}, thread::{sleep, JoinHandle}, time::{Duration, Instant}
 };
 
 use simple_dns::Packet;
@@ -138,9 +132,37 @@ impl DnsProcessor {
     }
 
     /**
-     * Send answers to client.
+     * Send answers to client directly
      */
-    fn respond_to_client(&mut self, mut reply: Vec<u8>) -> Result<(), ProcessingError> {
+    fn process_handler(&mut self, query: &Vec<u8>, from: &SocketAddr,) -> Result<(), Box<dyn std::error::Error>> {
+        let start = Instant::now();
+        let handler_result = self.handler.call(&query);
+        if handler_result.is_err() {
+            return Err(handler_result.unwrap_err());
+        };
+        let reply = handler_result.unwrap();
+
+        self.socket.send_to(&reply, from)?;
+
+        if self.verbose {
+            let request = Packet::parse(&query).unwrap();
+            let elapsed = start.elapsed();
+            let question = request.questions.get(0).unwrap();
+            println!(
+                "Handler reply {:?} within {}ms",
+                question,
+                elapsed.as_millis()
+            );
+        }
+
+        Ok(())
+    }
+
+
+    /**
+     * Send icann answers to client.
+     */
+    fn respond_icann_to_client(&mut self, mut reply: Vec<u8>) -> Result<(), ProcessingError> {
         let reply_packet = Packet::parse(&reply).unwrap();
         let mut removed_opt: Option<PendingQuery> = self.pending_queries.remove(&reply_packet.id());
         if removed_opt.is_none() {
@@ -179,15 +201,12 @@ impl DnsProcessor {
         let (size, from) = self.recv_from(&mut buffer)?;
         let query = buffer[..size].to_vec();
         if from == self.icann_resolver {
-            self.respond_to_client(query)?;
+            self.respond_icann_to_client(query)?;
         } else {
-            let result = self.handler.call(&query);
-            if result.is_ok() {
-                self.respond_to_client(result.unwrap())?;
-            } else {
+            let handler_result = self.process_handler(&query, &from);
+            if handler_result.is_err() {
                 self.forward_to_icann(query, from)?;
             }
-
         }
         Ok(())
     }
@@ -222,7 +241,7 @@ impl DnsProcessor {
 #[derive(Debug)]
 pub struct DnsThread {
     stop_signal: Arc<AtomicBool>,
-    handler: JoinHandle<Result<(), Error>>,
+    handler: JoinHandle<Result<(), crate::error::Error>>
 }
 
 impl DnsThread {
