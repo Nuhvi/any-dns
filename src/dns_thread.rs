@@ -193,7 +193,7 @@ impl DnsProcessor {
         if from == self.icann_resolver {
             self.respond_to_client(query)?;
         } else {
-            let result = self.handler.call(&query); // Todo: Support handler answer.
+            let result = self.handler.call(&query);
             if result.is_ok() {
                 self.respond_to_client(result.unwrap())?;
             } else {
