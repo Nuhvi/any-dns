@@ -4,7 +4,7 @@ use std::{
     ops::Range,
     str::FromStr,
     sync::{atomic::AtomicBool, mpsc::Sender, Arc, Mutex},
-    thread::JoinHandle,
+    thread::{sleep, JoinHandle},
     time::{Duration, Instant},
 };
 
@@ -13,7 +13,7 @@ use simple_dns::Packet;
 use crate::{
     custom_handler::HandlerHolder,
     error::{Error, Result},
-    pending_queries::{PendingQuery, PendingStore, ThreadSafeStore},
+    pending_queries::{PendingQuery, ThreadSafeStore},
 };
 
 
@@ -32,33 +32,17 @@ pub enum ProcessingError {
  */
 #[derive(Debug)]
 pub struct DnsProcessor {
-    pending_queries: PendingStore,
+    pending_queries: ThreadSafeStore,
     socket: UdpSocket,
     icann_resolver: SocketAddr,
     next_id: u16,
     id_range: Range<u16>,
     stop_signal: Arc<AtomicBool>,
     handler: HandlerHolder,
+    verbose: bool
 }
 
 impl DnsProcessor {
-    /**
-     * Creates a new non-threadsafe dns processor.
-     * `socket` is a socket handler.
-     * `handler` custom packet handler.
-     */
-    pub fn new(socket: UdpSocket, icann_resolver: SocketAddr, handler: HandlerHolder) -> Self {
-        DnsProcessor {
-            socket,
-            pending_queries: PendingStore::new_simple(),
-            icann_resolver,
-            id_range: 0..u16::MAX,
-            next_id: 0,
-            stop_signal: Arc::new(AtomicBool::new(false)),
-            handler,
-        }
-    }
-
     /**
      * Creates a new thread safe dns processor.
      * `socket` is a socket handler.
@@ -69,15 +53,12 @@ impl DnsProcessor {
     pub fn new_threadsafe(
         socket: UdpSocket,
         icann_resolver: SocketAddr,
-        pending_queries: PendingStore,
+        pending_queries: ThreadSafeStore,
         id_range: Range<u16>,
         stop_signal: Arc<AtomicBool>,
         handler: HandlerHolder,
+        verbose: bool
     ) -> Self {
-        match &pending_queries {
-            PendingStore::ThreadSafe(store) => {}
-            _ => panic!("PendingStore::ThreadSafe required to create a threadsafe DnsProcessor."),
-        };
         DnsProcessor {
             socket,
             pending_queries,
@@ -86,6 +67,7 @@ impl DnsProcessor {
             next_id: id_range.start,
             stop_signal,
             handler,
+            verbose
         }
     }
 
@@ -162,7 +144,10 @@ impl DnsProcessor {
         let reply_packet = Packet::parse(&reply).unwrap();
         let mut removed_opt: Option<PendingQuery> = self.pending_queries.remove(&reply_packet.id());
         if removed_opt.is_none() {
-            println!("No pending query to respond to.")
+            if self.verbose {
+                eprintln!("No pending query to respond to.");
+            }
+            return Ok(());
         }
 
         let pending = removed_opt.unwrap();
@@ -174,13 +159,16 @@ impl DnsProcessor {
         self.socket
             .send_to(&reply, pending.from)?;
 
-        let elapsed = pending.received_at.elapsed();
-        let question = pending_packet.questions.get(0).unwrap().clone();
-        println!(
-            "Reply {:?} within {}ms",
-            question,
-            elapsed.as_millis()
-        );
+        if self.verbose {
+            let elapsed = pending.received_at.elapsed();
+            let question = pending_packet.questions.get(0).unwrap().clone();
+            println!(
+                "Reply {:?} within {}ms",
+                question,
+                elapsed.as_millis()
+            );
+        }
+
         Ok(())
     }
 
@@ -218,7 +206,9 @@ impl DnsProcessor {
                     return Ok(());
                 },
                 ProcessingError::IO(err) => {
-                    eprintln!("IO error {}", err);
+                    if self.verbose {
+                        eprintln!("IO error {}", err);
+                    }
                 }
             }
         }
@@ -242,9 +232,10 @@ impl DnsThread {
     pub fn new(
         socket: &UdpSocket,
         icann_resolver: &SocketAddr,
-        pending_queries: &PendingStore,
+        pending_queries: &ThreadSafeStore,
         id_range: Range<u16>,
         handler: HandlerHolder,
+        verbose: bool
     ) -> Self {
         let socket = socket.try_clone().expect("Should clone");
         let icann_resolver = icann_resolver.clone();
@@ -256,6 +247,7 @@ impl DnsThread {
             id_range,
             stop_signal.clone(),
             handler,
+            verbose
         );
         let thread_work = std::thread::spawn(move || processor.run());
         DnsThread {

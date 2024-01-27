@@ -1,6 +1,5 @@
-
-use std::{fmt::Debug, error::Error};
 use dyn_clone::DynClone;
+use std::{error::Error, fmt::Debug};
 
 /**
  * Trait to implement to make AnyDns use a custom handler.
@@ -19,13 +18,17 @@ pub struct HandlerHolder {
 
 impl Clone for HandlerHolder {
     fn clone(&self) -> Self {
-        Self { func: dyn_clone::clone_box(&*self.func) }
+        Self {
+            func: dyn_clone::clone_box(&*self.func),
+        }
     }
 }
 
 impl Debug for HandlerHolder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("HandlerHolder").field("func", &"HandlerHolder").finish()
+        f.debug_struct("HandlerHolder")
+            .field("func", &"HandlerHolder")
+            .finish()
     }
 }
 
@@ -43,12 +46,11 @@ impl HandlerHolder {
 }
 
 #[derive(Clone)]
-pub struct EmptyHandler {
-}
+pub struct EmptyHandler {}
 
 impl EmptyHandler {
     pub fn new() -> Self {
-        EmptyHandler{}
+        EmptyHandler {}
     }
 }
 
@@ -58,43 +60,47 @@ impl CustomHandler for EmptyHandler {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use std::error::Error;
 
     use crate::custom_handler::EmptyHandler;
 
-    use super::{HandlerHolder, CustomHandler};
+    use super::{CustomHandler, HandlerHolder};
 
     struct ClonableStruct {
-        value: String
+        value: String,
     }
 
     impl Clone for ClonableStruct {
         fn clone(&self) -> Self {
-        Self { value: format!("{} cloned", self.value.clone()) }
-    }
+            Self {
+                value: format!("{} cloned", self.value.clone()),
+            }
+        }
     }
 
     #[derive(Clone)]
     pub struct TestHandler {
-        value: ClonableStruct
+        value: ClonableStruct,
     }
 
     impl TestHandler {
         pub fn new(value: &str) -> Self {
-            TestHandler{value: ClonableStruct{value: value.to_string()}}
+            TestHandler {
+                value: ClonableStruct {
+                    value: value.to_string(),
+                },
+            }
         }
     }
-    
+
     impl CustomHandler for TestHandler {
         fn lookup(&self, query: &Vec<u8>) -> Result<Vec<u8>, Box<dyn Error>> {
             println!("value {}", self.value.value);
             Err("Not implemented".into())
         }
     }
-
 
     #[test]
     fn run_processor() {
@@ -103,6 +109,5 @@ mod tests {
         let cloned = holder1.clone();
         let result = cloned.call(&vec![]);
         assert!(result.is_err());
-
     }
 }

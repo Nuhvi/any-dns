@@ -6,22 +6,26 @@ use std::{
     net::{SocketAddr, UdpSocket}, str::FromStr, thread::sleep, time::{Duration, Instant}, sync::{Arc, Mutex}, ops::Range,
 };
 
-use crate::{dns_thread::DnsThread, pending_queries::{PendingQuery, self, PendingStore}, custom_handler::{HandlerHolder, EmptyHandler, CustomHandler}};
+use crate::{dns_thread::DnsThread, pending_queries::{self, PendingQuery, ThreadSafeStore}, custom_handler::{HandlerHolder, EmptyHandler, CustomHandler}};
 
 
 
 pub struct Builder {
     icann_resolver: SocketAddr,
+    listen: SocketAddr,
     thread_count: u8,
     handler: HandlerHolder,
+    verbose: bool
 }
 
 impl Builder {
     pub fn new() -> Self {
         Self {
             icann_resolver: SocketAddr::from(([192, 168, 1, 1], 53)),
+            listen: SocketAddr::from(([0, 0, 0, 0], 53)),
             thread_count: 1,
             handler: HandlerHolder::new(EmptyHandler::new()),
+            verbose: false
         }
     }
 
@@ -31,9 +35,21 @@ impl Builder {
         self
     }
 
+    /// Set socket the server should listen on. Defaults to 0.0.0.0:53
+    pub fn listen(mut self, listen: SocketAddr) -> Self {
+        self.listen = listen;
+        self
+    }
+
     /// Set the number of threads used. Default: 1.
     pub fn threads(mut self, thread_count: u8) -> Self {
         self.thread_count = thread_count;
+        self
+    }
+
+    /// Makes the server log verbosely.
+    pub fn verbose(mut self, verbose: bool) -> Self {
+        self.verbose = verbose;
         self
     }
 
@@ -44,14 +60,13 @@ impl Builder {
     }
 
     pub fn build(self) -> AnyDNS {
-        let listening = SocketAddr::from_str("0.0.0.0:53").expect("Valid socket address");
-        let socket = UdpSocket::bind(listening).expect("Address available");
-        socket.set_read_timeout(Some(Duration::from_secs(1)));
-        let pending_queries = PendingStore::new_thread_safe();
+        let socket = UdpSocket::bind(self.listen).expect("Address available");
+        socket.set_read_timeout(Some(Duration::from_millis(500))); // So the DNS can be stopped.
+        let pending_queries = ThreadSafeStore::new();
         let mut threads = vec![];
         for i in 0..self.thread_count {
             let id_range = Self::calculate_id_range(self.thread_count as u16, i as u16);
-            let thread = DnsThread::new(&socket, &self.icann_resolver, &pending_queries, id_range, self.handler.clone());
+            let thread = DnsThread::new(&socket, &self.icann_resolver, &pending_queries, id_range, self.handler.clone(), self.verbose);
             threads.push(thread);
         }
 
