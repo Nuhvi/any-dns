@@ -145,12 +145,11 @@ impl DnsProcessor {
         self.socket.send_to(&reply, from)?;
 
         if self.verbose {
-            let request = Packet::parse(&query).unwrap();
             let elapsed = start.elapsed();
-            let question = request.questions.get(0).unwrap();
+            let reply_packet = Packet::parse(&reply).unwrap();
             println!(
-                "Handler reply {:?} within {}ms",
-                question,
+                "- Handler reply {:?} within {}ms",
+                reply_packet,
                 elapsed.as_millis()
             );
         }
@@ -185,8 +184,9 @@ impl DnsProcessor {
             let elapsed = pending.received_at.elapsed();
             let question = pending_packet.questions.get(0).unwrap().clone();
             println!(
-                "Reply {:?} within {}ms",
-                question,
+                "- Reply {:?} {:?} ICANN within {}ms",
+                question.qname.to_string(),
+                question.qtype,
                 elapsed.as_millis()
             );
         }

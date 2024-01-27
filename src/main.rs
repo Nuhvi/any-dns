@@ -11,7 +11,7 @@ use std::{cmp::Ordering, error::Error, net::Ipv4Addr, sync::{atomic::AtomicBool,
 use any_dns::{CustomHandler, Builder};
 use error::Result;
 use server::AnyDNS;
-use simple_dns::{Packet, ResourceRecord, QTYPE};
+use simple_dns::{Packet, PacketFlag, ResourceRecord, QTYPE};
 
 #[derive(Clone, Debug)]
 struct MyHandler {}
@@ -28,6 +28,7 @@ impl CustomHandler for MyHandler {
         };
 
         let mut reply = Packet::new_reply(packet.id());
+        reply.questions.push(question.clone());
         let ip: Ipv4Addr = "37.27.13.182".parse().unwrap();
         let record = ResourceRecord::new(question.qname.clone(), simple_dns::CLASS::IN, 120, simple_dns::rdata::RData::A(ip.try_into().unwrap()));
         reply.answers.push(record);
