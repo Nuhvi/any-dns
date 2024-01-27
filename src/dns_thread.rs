@@ -11,10 +11,25 @@ use std::{
 use simple_dns::Packet;
 
 use crate::{
+    custom_handler::HandlerHolder,
     error::{Error, Result},
     pending_queries::{PendingQuery, PendingStore, ThreadSafeStore},
 };
 
+
+
+#[derive(thiserror::Error, Debug)]
+pub enum ProcessingError {
+    #[error("User stopped dns manually.")]
+    Stopped(),
+    #[error(transparent)]
+    /// Transparent [std::io::Error]
+    IO(#[from] std::io::Error),
+}
+
+/**
+ * Single DNS packet processor.
+ */
 #[derive(Debug)]
 pub struct DnsProcessor {
     pending_queries: PendingStore,
@@ -23,7 +38,7 @@ pub struct DnsProcessor {
     next_id: u16,
     id_range: Range<u16>,
     stop_signal: Arc<AtomicBool>,
-    handler: for<'a> fn(&'a Packet<'a>) -> Result<Packet<'a>, String>,
+    handler: HandlerHolder,
 }
 
 impl DnsProcessor {
@@ -32,11 +47,7 @@ impl DnsProcessor {
      * `socket` is a socket handler.
      * `handler` custom packet handler.
      */
-    pub fn new(
-        socket: UdpSocket,
-        icann_resolver: SocketAddr,
-        handler: for<'a> fn(&'a Packet<'a>) -> Result<Packet<'a>, String>,
-    ) -> Self {
+    pub fn new(socket: UdpSocket, icann_resolver: SocketAddr, handler: HandlerHolder) -> Self {
         DnsProcessor {
             socket,
             pending_queries: PendingStore::new_simple(),
@@ -61,11 +72,11 @@ impl DnsProcessor {
         pending_queries: PendingStore,
         id_range: Range<u16>,
         stop_signal: Arc<AtomicBool>,
-        handler: for<'a> fn(&'a Packet<'a>) -> Result<Packet<'a>, String>,
+        handler: HandlerHolder,
     ) -> Self {
         match &pending_queries {
-            PendingStore::ThreadSafe(store) => {},
-            _ => panic!("PendingStore::ThreadSafe required.")
+            PendingStore::ThreadSafe(store) => {}
+            _ => panic!("PendingStore::ThreadSafe required to create a threadsafe DnsProcessor."),
         };
         DnsProcessor {
             socket,
@@ -90,7 +101,7 @@ impl DnsProcessor {
     /**
      * Receives data from the socket. Honors the timeout so the server can be stopped by the stop signal.
      */
-    fn recv_from(&self, buffer: &mut [u8; 1024]) -> Result<(usize, SocketAddr)> {
+    fn recv_from(&self, buffer: &mut [u8; 1024]) -> Result<(usize, SocketAddr), ProcessingError> {
         loop {
             match self.socket.recv_from(buffer) {
                 Ok((size, from)) => {
@@ -103,13 +114,13 @@ impl DnsProcessor {
                         // Run into timeout.
                         // https://doc.rust-lang.org/std/net/struct.UdpSocket.html#method.set_read_timeout
                         if self.should_stop() {
-                            return Err(Error::Static("Stopped"));
+                            return Err(ProcessingError::Stopped());
                         } else {
                             // Ok, let's continue
                             continue;
                         }
                     }
-                    return Err(Error::IO(err));
+                    return Err(ProcessingError::IO(err));
                 }
             }
         }
@@ -123,63 +134,95 @@ impl DnsProcessor {
     }
 
     /**
+     * Forward query to icann
+     */
+    fn forward_to_icann(&mut self, mut query: Vec<u8>, from: SocketAddr) -> Result<(), ProcessingError> {
+        let received = Instant::now();
+        let packet = Packet::parse(&query).unwrap();
+        let id = self.next_id();
+        self.pending_queries.insert(PendingQuery {
+            icann_id: id,
+            query: query.to_vec(),
+            from,
+            received_at: received,
+        });
+
+        let id_bytes = id.to_be_bytes();
+        query[0] = id_bytes[0];
+        query[1] = id_bytes[1];
+
+        self.socket.send_to(&query, self.icann_resolver)?;
+        Ok(())
+    }
+
+    /**
+     * Send answers to client.
+     */
+    fn respond_to_client(&mut self, mut reply: Vec<u8>) -> Result<(), ProcessingError> {
+        let reply_packet = Packet::parse(&reply).unwrap();
+        let mut removed_opt: Option<PendingQuery> = self.pending_queries.remove(&reply_packet.id());
+        if removed_opt.is_none() {
+            println!("No pending query to respond to.")
+        }
+
+        let pending = removed_opt.unwrap();
+        let pending_packet = Packet::parse(&pending.query).unwrap();
+        let id_bytes = pending_packet.id().to_be_bytes();
+        reply[0] = pending.query[0];
+        reply[1] = pending.query[1];
+
+        self.socket
+            .send_to(&reply, pending.from)?;
+
+        let elapsed = pending.received_at.elapsed();
+        let question = pending_packet.questions.get(0).unwrap().clone();
+        println!(
+            "Reply {:?} within {}ms",
+            question,
+            elapsed.as_millis()
+        );
+        Ok(())
+    }
+
+
+    /** Receive and process one udp packet.  */
+    fn process_packet(&mut self) -> Result<(), ProcessingError> {
+        let mut buffer = [0; 1024];
+        let (size, from) = self.recv_from(&mut buffer)?;
+        let query = buffer[..size].to_vec();
+        if from == self.icann_resolver {
+            self.respond_to_client(query)?;
+        } else {
+            let result = self.handler.call(&query); // Todo: Support handler answer.
+            if result.is_ok() {
+                self.respond_to_client(result.unwrap())?;
+            } else {
+                self.forward_to_icann(query, from)?;
+            }
+
+        }
+        Ok(())
+    }
+
+    /**
      * Run actual dns query logic.
      */
     pub fn run(&mut self) -> Result<()> {
-        let mut buffer = [0; 1024];
         loop {
-            let (size, from) = self.recv_from(&mut buffer)?;
-            let query = &mut buffer[..size];
-            if from == self.icann_resolver {
-                let packet = Packet::parse(query).unwrap();
-
-                let mut removed_opt: Option<PendingQuery> =
-                    self.pending_queries.remove(&packet.id());
-
-                if let Some(PendingQuery {
-                    id,
-                    query,
-                    from,
-                    sent,
-                }) = removed_opt
-                {
-                    let original_query = Packet::parse(&query).unwrap();
-                    (self.handler)(&original_query);
-
-                    let mut reply = Packet::new_reply(original_query.id());
-
-                    let qname = original_query.questions.get(0).unwrap().clone();
-
-                    for answer in packet.answers {
-                        reply.answers.push(answer)
-                    }
-
-                    for question in original_query.questions {
-                        reply.questions.push(question)
-                    }
-
-                    self.socket
-                        .send_to(&reply.build_bytes_vec().unwrap(), from)
-                        .unwrap();
-                    let elapsed = sent.elapsed();
-                    println!("Reply {:?} within {}ms", qname, elapsed.as_millis());
-                };
-            } else {
-                let id = self.next_id();
-                self.pending_queries.insert(PendingQuery {
-                    id: id,
-                    query: query.to_vec(),
-                    from,
-                    sent: Instant::now(),
-                });
-
-                let id_bytes = id.to_be_bytes();
-                query[0] = id_bytes[0];
-                query[1] = id_bytes[1];
-
-                self.socket.send_to(&query, self.icann_resolver).unwrap();
+            let result = self.process_packet();
+            if result.is_ok() {
+                continue;
+            };
+            match result.unwrap_err() {
+                ProcessingError::Stopped() => {
+                    return Ok(());
+                },
+                ProcessingError::IO(err) => {
+                    eprintln!("IO error {}", err);
+                }
             }
         }
+        Ok(())
     }
 }
 
@@ -199,18 +242,17 @@ impl DnsThread {
     pub fn new(
         socket: &UdpSocket,
         icann_resolver: &SocketAddr,
-        pending_queries: &Arc<Mutex<HashMap<u16, PendingQuery>>>,
+        pending_queries: &PendingStore,
         id_range: Range<u16>,
-        handler: for<'a> fn(&'a Packet<'a>) -> Result<Packet<'a>, String>,
+        handler: HandlerHolder,
     ) -> Self {
         let socket = socket.try_clone().expect("Should clone");
         let icann_resolver = icann_resolver.clone();
-        let pending_queries = PendingStore::new_concurrent();
         let stop_signal = Arc::new(AtomicBool::new(false));
         let mut processor = DnsProcessor::new_threadsafe(
             socket,
             icann_resolver,
-            pending_queries,
+            pending_queries.clone(),
             id_range,
             stop_signal.clone(),
             handler,
@@ -235,38 +277,4 @@ impl DnsThread {
         self.stop();
         self.handler.join();
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::{
-        collections::HashMap,
-        net::{SocketAddr, UdpSocket},
-        ops::Range,
-        str::FromStr,
-        sync::{atomic::AtomicBool, Arc, Mutex},
-        thread::sleep,
-        time::Duration,
-    };
-
-    use super::{DnsProcessor, PendingQuery};
-
-    // #[test]
-    // fn run_processor() {
-    //     let listening = SocketAddr::from_str("0.0.0.0:53").expect("Valid socket address");
-    //     let icann_resolver = SocketAddr::from_str("192.168.1.1:53").expect("Valid socket address");
-    //     let socket = UdpSocket::bind(listening).expect("Address available");
-    //     socket.set_read_timeout(Some(Duration::from_millis(500)));
-    //     println!("Listening on {}...", listening);
-    //     let pending_queries: Arc<Mutex<HashMap<u16, PendingQuery>>> =
-    //         Arc::new(Mutex::new(HashMap::new()));
-    //     let mut processor = DnsProcessor::new(
-    //         socket,
-    //         icann_resolver,
-    //         pending_queries,
-    //         Range{start: 0, end: 1000},
-    //         Arc::new(AtomicBool::new(false))
-    //     );
-    //     processor.run();
-    // }
 }

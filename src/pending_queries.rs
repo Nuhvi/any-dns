@@ -4,12 +4,12 @@ use std::{net::SocketAddr, time::Instant, collections::HashMap, sync::{Mutex, Ar
 pub struct PendingQuery {
     pub from: SocketAddr,
     pub query: Vec<u8>,
-    pub sent: Instant,
-    pub id: u16
+    pub received_at: Instant,
+    pub icann_id: u16,
 }
 
 /**
- * Simple pending query store. For multi-threading, use `ConcurrentStore``.
+ * Simple pending query store. For multi-threading, use `ThreadSafeStore``.
  */
 #[derive(Debug, Clone)]
 pub struct SimpleStore {
@@ -17,15 +17,15 @@ pub struct SimpleStore {
 }
 
 impl SimpleStore {
-    fn insert(&mut self, query: PendingQuery) {
-        self.pending_queries.insert(query.id, query);
+    pub fn insert(&mut self, query: PendingQuery) {
+        self.pending_queries.insert(query.icann_id, query);
     }
 
-    fn remove(&mut self, id: &u16) -> Option<PendingQuery> {
+    pub fn remove(&mut self, id: &u16) -> Option<PendingQuery> {
         self.pending_queries.remove(id)
     }
 
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             pending_queries: HashMap::new()
         }
@@ -45,7 +45,7 @@ pub struct ThreadSafeStore {
 impl ThreadSafeStore {
     fn insert(&mut self, query: PendingQuery) {
         let mut locked = self.pending_queries.lock().expect("Lock success");
-        locked.insert(query.id, query);
+        locked.insert(query.icann_id, query);
     }
 
     fn remove(&mut self, id: &u16) -> Option<PendingQuery> {
@@ -78,7 +78,7 @@ impl PendingStore {
         Self::Simple(SimpleStore::new())
     }
 
-    pub fn new_concurrent() -> Self {
+    pub fn new_thread_safe() -> Self {
         Self::ThreadSafe(ThreadSafeStore::new())
     }
 

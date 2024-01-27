@@ -6,26 +6,22 @@ use std::{
     net::{SocketAddr, UdpSocket}, str::FromStr, thread::sleep, time::{Duration, Instant}, sync::{Arc, Mutex}, ops::Range,
 };
 
-use crate::{dns_thread::DnsThread, pending_queries::PendingQuery};
+use crate::{dns_thread::DnsThread, pending_queries::{PendingQuery, self, PendingStore}, custom_handler::{HandlerHolder, EmptyHandler, CustomHandler}};
 
 
 
 pub struct Builder {
     icann_resolver: SocketAddr,
     thread_count: u8,
-    handler: for<'a> fn(&'a Packet<'a>) -> Result<Packet<'a>, String>,
+    handler: HandlerHolder,
 }
 
 impl Builder {
     pub fn new() -> Self {
-        let i = 32;
         Self {
             icann_resolver: SocketAddr::from(([192, 168, 1, 1], 53)),
-            thread_count: 8,
-            handler: |p| {
-                println!("Called handler ");
-                Err("Not processed".to_string())
-            }
+            thread_count: 1,
+            handler: HandlerHolder::new(EmptyHandler::new()),
         }
     }
 
@@ -35,15 +31,15 @@ impl Builder {
         self
     }
 
-    /// Set the number of threads used. Default: 8.
+    /// Set the number of threads used. Default: 1.
     pub fn threads(mut self, thread_count: u8) -> Self {
         self.thread_count = thread_count;
         self
     }
 
     /** Set handler to process the dns packet. `Ok()`` should include a dns packet with answers. `Err()` will fallback to ICANN. */
-    pub fn handler(mut self, handler: for<'a> fn(&Packet<'a>) -> Result<Packet<'a>, String>) -> Self {
-        self.handler = handler;
+    pub fn handler(mut self, handler: impl CustomHandler + 'static) -> Self {
+        self.handler = HandlerHolder::new(handler);
         self
     }
 
@@ -51,9 +47,7 @@ impl Builder {
         let listening = SocketAddr::from_str("0.0.0.0:53").expect("Valid socket address");
         let socket = UdpSocket::bind(listening).expect("Address available");
         socket.set_read_timeout(Some(Duration::from_secs(1)));
-        let pending_queries: Arc<Mutex<HashMap<u16, PendingQuery>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-
+        let pending_queries = PendingStore::new_thread_safe();
         let mut threads = vec![];
         for i in 0..self.thread_count {
             let id_range = Self::calculate_id_range(self.thread_count as u16, i as u16);
@@ -63,7 +57,6 @@ impl Builder {
 
         AnyDNS {
             threads,
-            pending_queries,
             icann_resolver: self.icann_resolver
         }
     }
@@ -81,7 +74,6 @@ impl Builder {
 pub struct AnyDNS {
     icann_resolver: SocketAddr,
     threads: Vec<DnsThread>,
-    pending_queries: Arc<Mutex<HashMap<u16, PendingQuery>>>,
 }
 
 impl AnyDNS {
