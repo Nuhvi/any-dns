@@ -6,7 +6,7 @@ use std::{error::Error, fmt::Debug};
  * Important: Handler must be clonable so it can be used by multiple threads.
  */
 pub trait CustomHandler: DynClone + Send {
-    fn lookup(&self, query: &Vec<u8>) -> Result<Vec<u8>, Box<dyn Error>>;
+    fn lookup(&mut self, query: &Vec<u8>) -> Result<Vec<u8>, Box<dyn Error>>;
 }
 
 /**
@@ -40,7 +40,7 @@ impl HandlerHolder {
         HandlerHolder { func: Box::new(f) }
     }
 
-    pub fn call(&self, query: &Vec<u8>) -> Result<Vec<u8>, Box<dyn Error>> {
+    pub fn call(&mut self, query: &Vec<u8>) -> Result<Vec<u8>, Box<dyn Error>> {
         self.func.lookup(query)
     }
 }
@@ -55,7 +55,7 @@ impl EmptyHandler {
 }
 
 impl CustomHandler for EmptyHandler {
-    fn lookup(&self, query: &Vec<u8>) -> Result<Vec<u8>, Box<dyn Error>> {
+    fn lookup(&mut self, query: &Vec<u8>) -> Result<Vec<u8>, Box<dyn Error>> {
         Err("Not implemented".into())
     }
 }
@@ -96,7 +96,7 @@ mod tests {
     }
 
     impl CustomHandler for TestHandler {
-        fn lookup(&self, query: &Vec<u8>) -> Result<Vec<u8>, Box<dyn Error>> {
+        fn lookup(&mut self, query: &Vec<u8>) -> Result<Vec<u8>, Box<dyn Error>> {
             println!("value {}", self.value.value);
             Err("Not implemented".into())
         }
@@ -106,7 +106,7 @@ mod tests {
     fn run_processor() {
         let mut test1 = TestHandler::new("test1");
         let holder1 = HandlerHolder::new(test1);
-        let cloned = holder1.clone();
+        let mut cloned = holder1.clone();
         let result = cloned.call(&vec![]);
         assert!(result.is_err());
     }

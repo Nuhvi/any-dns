@@ -20,7 +20,7 @@ impl CustomHandler for MyHandler {
     /**
      * Only resolve 1 custom domain 7fmjpcuuzf54hw18bsgi3zihzyh4awseeuq5tmojefaezjbd64cy.
      */
-    fn lookup(&self, query: &Vec<u8>) -> std::prelude::v1::Result<Vec<u8>, Box<dyn Error>> {
+    fn lookup(&mut self, query: &Vec<u8>) -> std::prelude::v1::Result<Vec<u8>, Box<dyn Error>> {
         let packet = Packet::parse(query).unwrap();
         let question = packet.questions.get(0).expect("Valid query");
         if question.qname.to_string() != "7fmjpcuuzf54hw18bsgi3zihzyh4awseeuq5tmojefaezjbd64cy" || question.qtype != QTYPE::TYPE(simple_dns::TYPE::A) {
