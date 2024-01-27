@@ -234,7 +234,7 @@ impl DnsThread {
         icann_resolver: &SocketAddr,
         pending_queries: &ThreadSafeStore,
         id_range: Range<u16>,
-        handler: HandlerHolder,
+        handler: &HandlerHolder,
         verbose: bool
     ) -> Self {
         let socket = socket.try_clone().expect("Should clone");
@@ -246,7 +246,7 @@ impl DnsThread {
             pending_queries.clone(),
             id_range,
             stop_signal.clone(),
-            handler,
+            handler.clone(),
             verbose
         );
         let thread_work = std::thread::spawn(move || processor.run());

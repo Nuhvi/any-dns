@@ -59,23 +59,24 @@ impl Builder {
         self
     }
 
+    /** Build and start server. */
     pub fn build(self) -> AnyDNS {
-        let socket = UdpSocket::bind(self.listen).expect("Address available");
+        let socket = UdpSocket::bind(self.listen).expect("Listen address should be available");
         socket.set_read_timeout(Some(Duration::from_millis(500))); // So the DNS can be stopped.
         let pending_queries = ThreadSafeStore::new();
         let mut threads = vec![];
         for i in 0..self.thread_count {
             let id_range = Self::calculate_id_range(self.thread_count as u16, i as u16);
-            let thread = DnsThread::new(&socket, &self.icann_resolver, &pending_queries, id_range, self.handler.clone(), self.verbose);
+            let thread = DnsThread::new(&socket, &self.icann_resolver, &pending_queries, id_range, &self.handler, self.verbose);
             threads.push(thread);
         }
 
         AnyDNS {
-            threads,
-            icann_resolver: self.icann_resolver
+            threads
         }
     }
 
+    /** Calculates the dns packet id range for each thread. */
     fn calculate_id_range(thread_count: u16, i: u16) -> Range<u16> {
         let bucket_size = u16::MAX / thread_count;
         Range{
@@ -87,7 +88,6 @@ impl Builder {
 
 #[derive(Debug)]
 pub struct AnyDNS {
-    icann_resolver: SocketAddr,
     threads: Vec<DnsThread>,
 }
 
